@@ -408,6 +408,8 @@ spec:
 }
 
 function printK8sPod {
+#  local image="hyperledger/fabric-tools"
+  local image="yxuco/dovetail-tools:v1.0.0"
   echo "
 apiVersion: v1
 kind: Pod
@@ -417,7 +419,7 @@ metadata:
 spec:
   containers:
   - name: tool
-    image: hyperledger/fabric-tools
+    image: ${image}
     imagePullPolicy: Always
     resources:
       requests:
@@ -444,6 +446,8 @@ spec:
       value: ${TEST_CHANNEL}
     - name: SVC_DOMAIN
       value: ${SVC_DOMAIN}
+    - name: WORK
+      value: /etc/hyperledger/tool
     command:
     - /bin/bash
     - -c
@@ -536,6 +540,58 @@ function execCommand {
   fi
 }
 
+# build chaincode cds package from flogo model json
+function buildFlogoChaincode {
+  if [ -z "${MODEL}" ]; then
+    echo "Model json file is not specified"
+    printHelp
+    return 1
+  fi
+  local _model=${MODEL##*/}
+  local name="${_model%.*}_cc"
+  local _src=${MODEL%/*}
+  if [ "${_src}" == "${_model}" ]; then
+    echo "set model file directory to PWD"
+    _src="."
+  fi
+  if [ ! -f "${DATA_ROOT}/tool/${name}/${_model}" ]; then
+    echo "copy ${MODEL} to ${DATA_ROOT}/tool/${name}"
+    ${surm} -rf ${DATA_ROOT}/tool/${name}
+    ${sumd} -p ${DATA_ROOT}/tool/${name}
+    ${sucp} ${MODEL} ${DATA_ROOT}/tool/${name}
+    if [ -d "${_src}/META-INF" ]; then
+      echo "copy META-INF from model folder"
+      ${surm} -rf ${DATA_ROOT}/tool/${name}/META-INF
+      ${sucp} -rf ${_src}/META-INF ${DATA_ROOT}/tool/${name}
+    fi
+  fi
+
+  local cmd="build-cds.sh ./${name}/${_model} ${name} ${VERSION}"
+  kubectl exec -it tool -n ${ORG} -- bash -c "/root/${cmd}"
+  echo "chaincode package is built in folder ${DATA_ROOT}/tool"
+}
+
+# build app executable from flogo model json
+function buildFlogoApp {
+  if [ -z "${MODEL}" ]; then
+    echo "Model json file is not specified"
+    printHelp
+    return 1
+  fi
+  local _model=${MODEL##*/}
+  local name=${_model%.*}
+  name=${name//_/-}
+
+  if [ ! -f "${DATA_ROOT}/tool/${_model}" ]; then
+    echo "copy ${MODEL} to ${DATA_ROOT}/tool"
+    ${sucp} ${MODEL} ${DATA_ROOT}/tool
+  fi
+
+  cmd="build-client.sh ./${_model} ${name} linux amd64"
+  kubectl exec -it tool -n ${ORG} -- bash -c "/root/${cmd}"
+  echo "app executable is built in folder ${DATA_ROOT}/tool"
+}
+
 # Print the usage message
 function printHelp() {
   echo "Usage: "
@@ -548,20 +604,25 @@ function printHelp() {
   echo "      - 'channel' - generate channel creation tx for specified channel name, with argument '-c <channel name>'"
   echo "      - 'mspconfig' - print MSP config json for adding to a network, output in '${DATA_ROOT}/tool'"
   echo "      - 'orderer-config' - print orderer RAFT consenter config for adding to a network, with arguments -s <start-seq> [-e <end-seq>]"
+  echo "      - 'build-cds' - build chaincode cds package from flogo model, with arguments -m <model-json> [-v <version>]"
+  echo "      - 'build-app' - build linux executable from flogo model, with arguments -m <model-json>"
   echo "    -p <property file> - the .env file in config folder that defines network properties, e.g., netop1 (default)"
   echo "    -t <env type> - deployment environment type: one of 'docker', 'k8s' (default), 'aws', 'az', or 'gcp'"
   echo "    -o <consensus type> - 'solo' or 'etcdraft' used with the 'genesis' command"
   echo "    -c <channel name> - name of a channel, used with the 'channel' command"
   echo "    -s <start seq> - start sequence number (inclusive) for orderer config"
   echo "    -e <end seq> - end sequence number (exclusive) for orderer config"
+  echo "    -m <model json> - Flogo model json file"
+  echo "    -v <cc version> - version of chaincode"
   echo "  msp-util.sh -h (print this message)"
 }
 
 ORG_ENV="netop1"
+VERSION=1.0
 
 CMD=${1}
 shift
-while getopts "h?p:t:o:c:s:e:" opt; do
+while getopts "h?p:t:o:c:s:e:m:v:" opt; do
   case "$opt" in
   h | \?)
     printHelp
@@ -584,6 +645,12 @@ while getopts "h?p:t:o:c:s:e:" opt; do
     ;;
   e)
     END_SEQ=$OPTARG
+    ;;
+  m)
+    MODEL=$OPTARG
+    ;;
+  v)
+    VERSION=$OPTARG
     ;;
   esac
 done
@@ -639,6 +706,14 @@ orderer-config)
   if [ "$?" -eq 0 ]; then
     execCommand "orderer-config ${START_SEQ} ${END_SEQ}"
   fi
+  ;;
+build-cds)
+  echo "build chaincode cds package: ${MODEL} ${VERSION}"
+  buildFlogoChaincode
+  ;;
+build-app)
+  echo "build executable for app: ${MODEL}"
+  buildFlogoApp
   ;;
 *)
   printHelp
